@@ -596,12 +596,18 @@
     }
   };
 
-  sb.auth.onAuthStateChange(async (_evt, s) => {
+  // Defer Supabase calls out of the callback: it runs while supabase-js holds
+  // its internal auth lock, and any awaited DB call here would re-acquire that
+  // lock and deadlock (leaderboard stuck on "Loading…"). setTimeout releases
+  // the lock first. See supabase-js onAuthStateChange docs.
+  sb.auth.onAuthStateChange((_evt, s) => {
     session = s;
-    await refreshProfile();
-    renderAuth();
-    loadBoard();
     if (location.hash.indexOf('access_token') !== -1) history.replaceState(null, '', location.pathname);
+    setTimeout(async () => {
+      await refreshProfile();
+      renderAuth();
+      loadBoard();
+    }, 0);
   });
 
   loadBoard();
