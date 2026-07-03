@@ -39,6 +39,36 @@
     padding: 12px 36px; font-size: 16px; font-weight: 600; border-radius: 10px; cursor: pointer;
   }
   #btn-start:hover { background: #fff; }
+  #lb-wrap { width: 100%; max-width: 320px; display: flex; flex-direction: column; gap: 16px; margin-top: 6px; }
+  #auth { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
+  #auth input {
+    width: 100%; padding: 10px 12px; border-radius: 8px; text-align: center;
+    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.15);
+    color: #e8e6dc; font-size: 15px;
+  }
+  #auth input::placeholder { color: #7d84a6; }
+  #auth button {
+    width: 100%; padding: 10px 12px; border-radius: 8px; border: none; cursor: pointer;
+    background: #85B7EB; color: #06081a; font-size: 14px; font-weight: 600;
+  }
+  #auth button:hover { background: #a5cbf2; }
+  #auth button:disabled { opacity: 0.5; cursor: default; }
+  #auth .muted { font-size: 12px; color: #7d84a6; line-height: 1.5; text-align: center; }
+  #auth .msg { font-size: 13px; color: #9FE1CB; text-align: center; }
+  #auth .who { font-size: 13px; color: #9aa0c0; text-align: center; }
+  #auth .who b { color: #e8e6dc; }
+  #auth .who a { color: #85B7EB; cursor: pointer; text-decoration: underline; }
+  #lb h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; color: #7d84a6; margin-bottom: 8px; }
+  #lb ol { list-style: none; display: flex; flex-direction: column; gap: 2px; }
+  #lb li {
+    display: flex; align-items: baseline; font-size: 14px; padding: 5px 8px;
+    border-radius: 6px; color: #b9bdd4; font-variant-numeric: tabular-nums;
+  }
+  #lb li .rank { color: #7d84a6; width: 22px; text-align: right; margin-right: 10px; flex: none; }
+  #lb li .name { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #lb li .val { flex: none; margin-left: 10px; }
+  #lb li.me { background: rgba(250,199,117,0.14); color: #FAC775; }
+  #lb .empty { font-size: 13px; color: #7d84a6; text-align: center; }
 </style>
 </head>
 <body>
@@ -61,6 +91,13 @@
     <p id="ov-sub">Steer the comet with your mouse or finger. Catch stars, chain combos up to &times;8, dodge asteroids. Gold stars grant a shield &mdash; or something better.</p>
     <p id="ov-score"></p>
     <button id="btn-start">Play</button>
+    <div id="lb-wrap">
+      <div id="auth"></div>
+      <div id="lb">
+        <h2>Global Top 10</h2>
+        <div id="lb-body"><div class="empty">Loading&hellip;</div></div>
+      </div>
+    </div>
   </div>
 </div>
 <script>
@@ -405,6 +442,7 @@
     sOver();
     best = Math.max(best, Math.round(score));
     try { localStorage.setItem('starstruck-best', String(best)); } catch (e) {}
+    if (window.Leaderboard && window.Leaderboard.ready) window.Leaderboard.submit(Math.round(score));
     updateHud();
     overlay.style.display = 'flex';
     ovSub.textContent = 'The stars have dimmed. One more run?';
@@ -437,6 +475,136 @@
 
   updateHud();
   draw();
+})();
+</script>
+
+<!-- ---------- Global leaderboard (Supabase) ---------- -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script>
+(function () {
+  // Public config. The anon key is designed to be shipped in the browser;
+  // row-level security in supabase/schema.sql is what actually guards the data.
+  const SUPABASE_URL = '__SUPABASE_URL__';
+  const SUPABASE_ANON_KEY = '__SUPABASE_ANON_KEY__';
+
+  const authEl = document.getElementById('auth');
+  const lbBody = document.getElementById('lb-body');
+
+  const esc = s => String(s).replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+
+  // Stay inert (game still fully playable) until real credentials are wired in.
+  const configured = SUPABASE_URL.indexOf('http') === 0 && SUPABASE_ANON_KEY.length > 20;
+  if (!configured || !window.supabase) {
+    authEl.innerHTML = '<span class="muted">Global leaderboard coming soon.</span>';
+    lbBody.innerHTML = '';
+    window.Leaderboard = { ready: false, submit: function () {} };
+    return;
+  }
+
+  const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    auth: { persistSession: true, detectSessionInUrl: true, autoRefreshToken: true }
+  });
+
+  let session = null, profile = null, pendingScore = 0;
+
+  async function refreshProfile() {
+    profile = null;
+    if (!session) return;
+    const { data } = await sb.from('profiles').select('username').eq('id', session.user.id).maybeSingle();
+    profile = data || null;
+  }
+
+  function renderAuth(msg) {
+    const note = msg ? '<span class="msg">' + esc(msg) + '</span>' : '';
+    if (!session) {
+      authEl.innerHTML =
+        '<input id="au-email" type="email" placeholder="you@email.com" autocomplete="email">' +
+        '<button id="au-send">Email me a login link</button>' +
+        (msg ? note : '<span class="muted">Sign in to save your scores to the global leaderboard.</span>');
+      const send = document.getElementById('au-send');
+      send.onclick = sendLink;
+      document.getElementById('au-email').onkeydown = e => { if (e.key === 'Enter') sendLink(); };
+    } else if (!profile) {
+      authEl.innerHTML =
+        '<input id="au-name" placeholder="Pick a username" maxlength="16" autocomplete="off">' +
+        '<button id="au-save">Save username</button>' +
+        (msg ? note : '<span class="muted">Choose a name for the leaderboard (3&ndash;16 characters).</span>');
+      document.getElementById('au-save').onclick = saveName;
+      document.getElementById('au-name').onkeydown = e => { if (e.key === 'Enter') saveName(); };
+    } else {
+      authEl.innerHTML =
+        '<span class="who">Signed in as <b>' + esc(profile.username) + '</b> &middot; <a id="au-out">sign out</a></span>' + note;
+      document.getElementById('au-out').onclick = () => sb.auth.signOut();
+    }
+  }
+
+  async function sendLink() {
+    const email = (document.getElementById('au-email').value || '').trim();
+    if (!email) return;
+    const btn = document.getElementById('au-send');
+    btn.disabled = true; btn.textContent = 'Sending…';
+    const { error } = await sb.auth.signInWithOtp({
+      email, options: { emailRedirectTo: location.origin + location.pathname }
+    });
+    renderAuth(error ? 'Error: ' + error.message : 'Check ' + email + ' for your login link.');
+  }
+
+  async function saveName() {
+    const username = (document.getElementById('au-name').value || '').trim();
+    if (username.length < 3) { renderAuth('Name must be at least 3 characters.'); return; }
+    document.getElementById('au-save').disabled = true;
+    const { error } = await sb.from('profiles').insert({ id: session.user.id, username });
+    if (error) {
+      renderAuth(error.code === '23505' ? 'That name is taken — try another.' : 'Error: ' + error.message);
+      return;
+    }
+    await refreshProfile();
+    renderAuth();
+    if (pendingScore > 0) { await submitScore(pendingScore); pendingScore = 0; }
+    loadBoard();
+  }
+
+  async function submitScore(score) {
+    if (!session || !profile || !score) return;
+    const { error } = await sb.from('scores').insert({ user_id: session.user.id, score: Math.round(score) });
+    if (!error) { renderAuth('Saved your score of ' + Math.round(score).toLocaleString() + '!'); loadBoard(); }
+  }
+
+  async function loadBoard() {
+    const { data, error } = await sb
+      .from('leaderboard').select('username,best_score')
+      .order('best_score', { ascending: false }).limit(10);
+    if (error) { lbBody.innerHTML = '<div class="empty">Leaderboard unavailable.</div>'; return; }
+    if (!data || !data.length) { lbBody.innerHTML = '<div class="empty">No scores yet &mdash; be the first!</div>'; return; }
+    const mine = profile ? profile.username : null;
+    lbBody.innerHTML = '<ol>' + data.map((r, i) =>
+      '<li class="' + (r.username === mine ? 'me' : '') + '">' +
+      '<span class="rank">' + (i + 1) + '</span>' +
+      '<span class="name">' + esc(r.username) + '</span>' +
+      '<span class="val">' + Number(r.best_score).toLocaleString() + '</span></li>'
+    ).join('') + '</ol>';
+  }
+
+  // Called by the game on game over.
+  window.Leaderboard = {
+    ready: true,
+    submit: function (score) {
+      score = Math.round(score);
+      if (session && profile) submitScore(score);
+      else if (session) { pendingScore = score; renderAuth('Pick a username to save your score of ' + score.toLocaleString() + '.'); }
+      else renderAuth('Sign in to save your score of ' + score.toLocaleString() + '.');
+    }
+  };
+
+  sb.auth.onAuthStateChange(async (_evt, s) => {
+    session = s;
+    await refreshProfile();
+    renderAuth();
+    loadBoard();
+    if (location.hash.indexOf('access_token') !== -1) history.replaceState(null, '', location.pathname);
+  });
+
+  loadBoard();
 })();
 </script>
 </body>
